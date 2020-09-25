@@ -335,6 +335,7 @@ list(REMOVE_ITEM TEST_OPS test_conv3d_transpose_op)
 list(REMOVE_ITEM TEST_OPS test_imperative_data_loader_exception)
 list(REMOVE_ITEM TEST_OPS test_sampling_id_op)
 list(REMOVE_ITEM TEST_OPS test_paddle_save_load)
+list(REMOVE_ITEM TEST_OPS test_parallel_executor_fetch_isolated_var)
 
 
 
