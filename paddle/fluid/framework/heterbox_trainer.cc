@@ -111,6 +111,7 @@ void HeterBoxTrainer::InitTrainerEnv(const ProgramDesc& main_program,
     workers_[i]->CacheProgram(main_program);
 #endif
   }
+  // afafsdfdafdads
   for (size_t num = 0; num < places_.size(); ++num) {
     auto place = places_[num];
     Scope* scope = workers_[num]->GetThreadScope();

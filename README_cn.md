@@ -33,7 +33,7 @@ pip install paddlepaddle-gpu
 pip install paddlepaddle-gpu==1.8.5.post97
 
 ```
-更多安装信息详见官网 [安装说明](http://www.paddlepaddle.org.cn/documentation/docs/zh/1.8/beginners_guide/install/index_cn.html)
+更多安装信息123123详见官网 [安装说明](http://www.paddlepaddle.org.cn/documentation/docs/zh/1.8/beginners_guide/install/index_cn.html)
 
 PaddlePaddle用户可领取**免费Tesla V100在线算力资源**，训练模型更高效。**每日登陆即送12小时**，**连续五天运行再加送48小时**，[前往使用免费算力](https://ai.baidu.com/support/news?action=detail&id=981)。
 
