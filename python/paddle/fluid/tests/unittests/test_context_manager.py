@@ -21,7 +21,7 @@ class TestContextManagerRaiseException(unittest.TestCase):
     def test_func1(self):
         def foo():
             with fluid.dygraph.guard():
-                print("raise error in context manager")
+                print("There raise error in context manager")
                 raise TypeError("error")
 
         self.assertRaises(TypeError, foo)
