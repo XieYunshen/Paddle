@@ -1,8 +1,11 @@
 /* Copyright (c) 2016 PaddlePaddle Authors. All Rights Reserved.
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
+
     http://www.apache.org/licenses/LICENSE-2.0
+
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,8 +25,8 @@ limitations under the License. */
 #include "paddle/fluid/operators/math/math_function.h"
 
 #include "paddle/fluid/operators/distributed/async_sparse_param_update_recorder.h"
-#include "paddle/fluid/operators/distributed/barrier_monitor.h"
 #include "paddle/fluid/operators/distributed/heart_beat_monitor.h"
+#include "paddle/fluid/operators/distributed/large_scale_kv.h"
 #include "paddle/fluid/operators/distributed/request_handler_impl.h"
 #include "paddle/fluid/operators/distributed_ops/listen_and_serv_op.h"
 
@@ -35,8 +38,6 @@ DEFINE_int32(rpc_prefetch_thread_num, 12, "number of threads for rpc prefetch");
 
 namespace paddle {
 namespace operators {
-
-volatile sig_atomic_t gSignalStatus;
 
 void RunServer(std::shared_ptr<distributed::RPCServer> service) {
   service->StartServer();
@@ -110,6 +111,19 @@ static int64_t GetTimestamp() {
   return tp.tv_sec * 1000 + tp.tv_usec / 1000;
 }
 
+// For sync, sparse variables need recover grad type from LodTensor to
+// SelectedRows
+void ResetSparseVarsType(framework::Scope *recv_scope) {
+  auto *ins = distributed::LargeScaleKV::GetInstance();
+  auto grads = ins->GetAllGrads();
+
+  for (auto &grad : grads) {
+    auto *v = recv_scope->FindVar(grad);
+    v->Clear();
+    v->GetMutable<framework::SelectedRows>();
+  }
+}
+
 void ListenAndServOp::RunSyncLoop(
     framework::Executor *executor, framework::ProgramDesc *program,
     framework::Scope *recv_scope, platform::DeviceContext *dev_ctx,
@@ -120,14 +134,16 @@ void ListenAndServOp::RunSyncLoop(
   auto optimize_blocks =
       Attr<std::vector<framework::BlockDesc *>>(kOptimizeBlocks);
   PADDLE_ENFORCE_GE(num_blocks, 2,
-                    "server program should have at least 2 blocks");
+                    platform::errors::PreconditionNotMet(
+                        "Invalid number of blocks in server program. Expected "
+                        "equal or greater than 2. Recieved %zu",
+                        num_blocks));
 
   // Prepare all the server block
   std::vector<int> optimize_blocks_list;
   for (size_t i = 1; i < program->Size(); ++i) {
     optimize_blocks_list.push_back(i);
   }
-
   auto optimize_prepared = executor->Prepare(*program, optimize_blocks_list);
   // Insert placeholder for block0 which holds current op itself,
   // NOTE the first block in `optimize_prepared` should never be ran.
@@ -137,15 +153,21 @@ void ListenAndServOp::RunSyncLoop(
 
   // Trainers will get all parameters from pserver in the
   // startup program, so we will wait RequestGet first
-  auto *barrier = distributed::BarrierMonitor::GetInstance();
+  rpc_service_->SetCond(distributed::kRequestGet);
+  rpc_service_->WaitBarrier(distributed::kRequestGet);
+  rpc_service_->ResetBarrierCounter();
 
   while (true) {
     // Get from multiple trainers, we don't care about the order in which
     // the gradients arrives, just add suffix 0~n and merge the gradient.
-    barrier->WaitServerWeakup();
+    VLOG(3) << "wait all clients to send gradient";
+    rpc_service_->SetCond(distributed::kRequestSend);
+    VLOG(3) << "wait all clients to send send_barrier";
+    rpc_service_->WaitBarrier(distributed::kRequestSend);
 
-    if (gSignalStatus != 0) {
+    if (rpc_service_->IsExit()) {
       LOG(WARNING) << "get exit!rpc_processor break!";
+      rpc_service_->SetCond(distributed::kRequestGet);
       break;
     }
 
@@ -175,9 +197,14 @@ void ListenAndServOp::RunSyncLoop(
 
     VLOG(3) << "ResetReceivedVars";
     ResetReceivedVars(recv_scope, dev_ctx, rpc_service_->NeedResetAllVars());
+    ResetSparseVarsType(recv_scope);
 
-    barrier->ServerWeakup();
-    VLOG(3) << "kRecvBarrier to push params to trainers";
+    VLOG(3) << "wait all clients to get parameters back";
+    rpc_service_->SetCond(distributed::kRequestGet);
+    VLOG(3) << "wait all clients to send fetch_barrier";
+    rpc_service_->WaitBarrier(distributed::kRequestGet);
+    VLOG(3) << "ResetBarrierCounter";
+    rpc_service_->ResetBarrierCounter();
   }  // while(true)
 }
 
@@ -194,7 +221,8 @@ void ListenAndServOp::ResetReceivedVars(framework::Scope *recv_scope,
       VLOG(3) << "reset sparse var: " << varname;
       var->GetMutable<framework::SelectedRows>()->mutable_rows()->clear();
     } else {
-      PADDLE_THROW("The type of sparse var should be SelectedRows");
+      PADDLE_THROW(platform::errors::PreconditionNotMet(
+          "The type of sparse var should be SelectedRows"));
     }
   }
   if (UNLIKELY(reset_all)) {
@@ -211,7 +239,8 @@ void ListenAndServOp::ResetReceivedVars(framework::Scope *recv_scope,
         math::set_constant(*dev_ctx, var->GetMutable<framework::Tensor>(),
                            static_cast<float>(0));
       } else {
-        PADDLE_THROW("The type of dense var should be in [LoDTensor, Tensor]");
+        PADDLE_THROW(platform::errors::PreconditionNotMet(
+            "The type of dense var should be in [LoDTensor, Tensor]"));
       }
     }
   }
@@ -230,8 +259,15 @@ void ListenAndServOp::RunAsyncLoop(framework::Executor *executor,
     std::vector<std::string> pieces;
     split(grad_and_id, ':', &pieces);
     VLOG(3) << "after split, key = " << pieces[0] << ", id=" << pieces[1];
-    PADDLE_ENFORCE_EQ(pieces.size(), 2);
-    PADDLE_ENFORCE_EQ(out_map->count(pieces[0]), 0);
+    PADDLE_ENFORCE_EQ(pieces.size(), 2,
+                      platform::errors::PreconditionNotMet(
+                          "Invalid format of grad_and_id argument. "
+                          "Expected \"grad:block_id\". Recieved %s",
+                          grad_and_id.c_str()));
+    PADDLE_ENFORCE_EQ(out_map->count(pieces[0]), 0,
+                      platform::errors::AlreadyExists(
+                          "The gradient name %s has already existed in out_map",
+                          pieces[0].c_str()));
 
     int block_id = std::stoi(pieces[1]);
     (*out_map)[pieces[0]] = block_id;
@@ -243,8 +279,10 @@ void ListenAndServOp::RunAsyncLoop(framework::Executor *executor,
 
   size_t num_blocks = program->Size();
   PADDLE_ENFORCE_GE(num_blocks, 2,
-                    "server program should have at least 2 blocks");
-
+                    platform::errors::PreconditionNotMet(
+                        "Invalid number of blocks in server program. Expected "
+                        "equal or greater than 2. Recieved %zu",
+                        num_blocks));
   std::vector<int> block_list;
   for (size_t blkid = 1; blkid < num_blocks; ++blkid) {
     block_list.push_back(blkid);
@@ -271,9 +309,10 @@ void ListenAndServOp::RunAsyncLoop(framework::Executor *executor,
   request_send_handler_->SetGradToPreparedCtx(&grad_to_prepared_ctx);
   request_get_handler_->SetGradToPreparedCtx(&grad_to_prepared_ctx);
   request_prefetch_handler_->SetGradToPreparedCtx(&grad_to_prepared_ctx);
+  request_send_and_recv_handler_->SetGradToPreparedCtx(&grad_to_prepared_ctx);
 
   while (true) {
-    if (gSignalStatus != 0) {
+    if (rpc_service_->IsExit()) {
       VLOG(4) << "get exit!rpc_processor break!";
       break;
     }
@@ -318,9 +357,9 @@ void ListenAndServOp::CacheVarsType(const std::vector<std::string> &varnames,
                var->IsType<framework::Tensor>()) {
       dense_vars_.push_back(varname);
     } else {
-      PADDLE_THROW(
+      PADDLE_THROW(platform::errors::PreconditionNotMet(
           "The type of received var should be in [SelectedRows, LoDTensor, "
-          "Tensor].");
+          "Tensor]."));
     }
   }
 }
@@ -364,12 +403,14 @@ void ListenAndServOp::RunImpl(const framework::Scope &scope,
       new distributed::RequestGetHandler(distributed_mode, dc_sgd));
   request_prefetch_handler_.reset(
       new distributed::RequestPrefetchHandler(distributed_mode));
-  request_checkpoint_handler_.reset(new distributed::RequestCheckpointHandler(
-      distributed_mode, checkpoint_block_id));
+  request_checkpoint_handler_.reset(
+      new distributed::RequestCheckpointHandler(distributed_mode));
   request_get_no_barrier_handler_.reset(
       new distributed::RequestGetNoBarrierHandler());
-  request_notify_handler_.reset(new distributed::RequestNotifyHandler(
-      distributed_mode, lr_decay_block_id));
+  request_notify_handler_.reset(
+      new distributed::RequestNotifyHandler(distributed_mode, fan_in));
+  request_send_and_recv_handler_.reset(
+      new distributed::RequestSendAndRecvHandler(distributed_mode));
 
   rpc_service_->RegisterRPC(distributed::kRequestSend,
                             request_send_handler_.get(), rpc_send_thread_num);
@@ -383,7 +424,10 @@ void ListenAndServOp::RunImpl(const framework::Scope &scope,
   rpc_service_->RegisterRPC(distributed::kRequestGetNoBarrier,
                             request_get_no_barrier_handler_.get());
   rpc_service_->RegisterRPC(distributed::kRequestNotify,
-                            request_notify_handler_.get(), fan_in * 2);
+                            request_notify_handler_.get(), rpc_send_thread_num);
+  rpc_service_->RegisterRPC(distributed::kRequestSendAndRecv,
+                            request_send_and_recv_handler_.get(),
+                            rpc_get_thread_num);
 
   auto optimize_blocks =
       Attr<std::vector<framework::BlockDesc *>>(kOptimizeBlocks);
@@ -392,6 +436,7 @@ void ListenAndServOp::RunImpl(const framework::Scope &scope,
                         "optimize blocks is less than 1. Optimize blocks "
                         "should be 1 at least on the pserver side."));
   auto *program = optimize_blocks[0]->Program();
+
   framework::Executor executor(dev_place);
 
   std::shared_ptr<framework::ExecutorPrepareContext> ckpt_pre_context = nullptr;
@@ -420,7 +465,12 @@ void ListenAndServOp::RunImpl(const framework::Scope &scope,
     split(prefetch_var_name_and_id, ':', &pieces);
     VLOG(3) << "after split, prefetch_var = " << pieces[0]
             << ", id=" << pieces[1];
-    PADDLE_ENFORCE_EQ(pieces.size(), 2);
+    PADDLE_ENFORCE_EQ(
+        pieces.size(), 2,
+        platform::errors::PreconditionNotMet(
+            "Invalid format of prefetch_var_name_and_id argument. "
+            "Expected \"xxx:xxx\". Recieved %s",
+            prefetch_var_name_and_id.c_str()));
 
     int block_id = std::stoi(pieces[1]);
     prefetch_block_id_list.push_back(block_id);
@@ -432,7 +482,6 @@ void ListenAndServOp::RunImpl(const framework::Scope &scope,
   std::unordered_map<std::string,
                      std::shared_ptr<framework::ExecutorPrepareContext>>
       prefetch_var_name_to_prepared_ctx;
-
   for (size_t i = 0; i < prefetch_block_id_list.size(); ++i) {
     auto block_id = prefetch_block_id_list[i];
     auto prefetch_var_name = block_id_to_prefetch_var_name[block_id];
@@ -441,15 +490,18 @@ void ListenAndServOp::RunImpl(const framework::Scope &scope,
 
   // parse attr of kSparseGradToParam  sparse_grad_name -> param_name
   std::unordered_map<std::string, std::string> sparse_grad_name_to_param_name;
-
   auto sparse_grad_name_to_param_name_str =
       Attr<std::vector<std::string>>(kSparseGradToParam);
-
   for (const auto &sparse_grad_name_and_param_name :
        sparse_grad_name_to_param_name_str) {
     std::vector<std::string> pieces;
     split(sparse_grad_name_and_param_name, ':', &pieces);
-    PADDLE_ENFORCE_EQ(pieces.size(), 2);
+    PADDLE_ENFORCE_EQ(
+        pieces.size(), 2,
+        platform::errors::PreconditionNotMet(
+            "Invalid format of sparse_grad_name_and_param_name argument. "
+            "Expected \"xxx:xxx\". Recieved %s",
+            sparse_grad_name_and_param_name.c_str()));
     VLOG(3) << "after split, sparse_grad_name = " << pieces[0]
             << ", param_name = " << pieces[1];
     sparse_grad_name_to_param_name[pieces[0]] = pieces[1];
@@ -467,22 +519,22 @@ void ListenAndServOp::RunImpl(const framework::Scope &scope,
   f(request_checkpoint_handler_.get());
   f(request_get_no_barrier_handler_.get());
   f(request_notify_handler_.get());
+  f(request_send_and_recv_handler_.get());
 
   // register SIGINT(from ctrl+C) and SIGTERM(from kill) signal handlers
   signal(SIGINT, SignalHandler::StopAndExit);
   signal(SIGTERM, SignalHandler::StopAndExit);
-
-  distributed::BarrierMonitor::Init(fan_in);
 
   if (distributed_mode == distributed::DistributedMode::kSync) {
     // start the server listening after all member initialized.
     server_thread_.reset(new std::thread(RunServer, rpc_service_));
     VLOG(3) << "wait server thread to become ready...";
     rpc_service_->WaitServerReady();
-    // Write to a file of server selected port for python use.
-    SavePort();
 
     CacheVarsType(inputs, recv_scope);
+
+    // Write to a file of server selected port for python use.
+    SavePort();
 
     RunSyncLoop(&executor, program, &recv_scope, &dev_ctx,
                 prefetch_block_id_list, checkpoint_block_id);
@@ -570,8 +622,9 @@ class ListenAndServOpMaker : public framework::OpProtoAndCheckerMaker {
 void SignalHandler::StopAndExit(int signal_num) {
   // Do not use VLOG here for the device for printing maybe already released.
   // exit will release interal allocated resoureces.
-  distributed::BarrierMonitor::GetInstance()->Stop();
-  gSignalStatus = signal_num;
+  auto file_path = string::Sprintf("/tmp/paddle.%d.port", ::getpid());
+  remove(file_path.c_str());
+  exit(0);
 }
 
 }  // namespace operators

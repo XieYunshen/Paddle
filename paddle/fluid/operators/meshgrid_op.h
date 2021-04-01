@@ -50,16 +50,6 @@
 namespace paddle {
 namespace operators {
 
-template <typename T, int MajorType = Eigen::RowMajor,
-          typename IndexType = Eigen::DenseIndex>
-using EigenMatrix = framework::EigenMatrix<T, MajorType, IndexType>;
-template <typename T, int MajorType = Eigen::RowMajor,
-          typename IndexType = Eigen::DenseIndex>
-using EigenVector = framework::EigenVector<T, MajorType, IndexType>;
-template <typename T, size_t D, int MajorType = Eigen::RowMajor,
-          typename IndexType = Eigen::DenseIndex>
-using EigenTensor = framework::EigenTensor<T, D, MajorType, IndexType>;
-
 template <typename DeviceContext, typename T>
 class MeshgridKernel : public framework::OpKernel<T> {
  public:
@@ -70,7 +60,8 @@ class MeshgridKernel : public framework::OpKernel<T> {
       REP_MESHGRID_TEMPLATE(MAX_RANK_SUPPORTED)
       default:
         PADDLE_THROW(platform::errors::InvalidArgument(
-            "Only support tensor nums between 1 and 6."));
+            "Excepted Tensor numbers between 1 and 6, but only received d% .",
+            rank));
     }
   }
 
@@ -81,7 +72,9 @@ class MeshgridKernel : public framework::OpKernel<T> {
     auto outs = context.MultiOutput<framework::Tensor>("Out");
     PADDLE_ENFORCE_EQ(
         ins.size() > 1, true,
-        platform::errors::InvalidArgument("expect at least 2 input tensors"));
+        platform::errors::InvalidArgument(
+            "Expected at least 2 input tensors, but only received d%.",
+            ins.size()));
 
     int64_t size = ins.size();
     std::vector<int64_t> shape(size);
@@ -120,9 +113,9 @@ class MeshgridKernel : public framework::OpKernel<T> {
       bcast_dims[i] = 1;
 
       outs[i]->Resize(out_dims);
-      auto x = EigenTensor<T, Rank>::From(reshape_ins_tensor);
+      auto x = framework::EigenTensor<T, Rank>::From(reshape_ins_tensor);
       outs[i]->mutable_data<T>(context.GetPlace());
-      auto y = EigenTensor<T, Rank>::From(*outs[i]);
+      auto y = framework::EigenTensor<T, Rank>::From(*outs[i]);
       auto& place =
           *context.template device_context<DeviceContext>().eigen_device();
       y.device(place) = x.broadcast(bcast_dims);
@@ -141,7 +134,8 @@ class MeshgridGradKernel : public framework::OpKernel<T> {
       REP_MESHGRID_GRAD_TEMPLATE(MAX_RANK_SUPPORTED)
       default:
         PADDLE_THROW(platform::errors::InvalidArgument(
-            "only support tensor nums being between 1 and 6."));
+            "Excepted Tensor numbers between 1 and 6, but only received d% .",
+            n));
     }
   }
 
@@ -159,8 +153,8 @@ class MeshgridGradKernel : public framework::OpKernel<T> {
 
     for (int i = 0; i < n; i++) {
       outs[i]->mutable_data<T>(context.GetPlace());
-      auto out_grad_tmp = EigenVector<T>::Flatten(*out_grad[i]);
-      auto in_grad = EigenVector<T>::Flatten(*outs[i]);
+      auto out_grad_tmp = framework::EigenVector<T>::Flatten(*out_grad[i]);
+      auto in_grad = framework::EigenVector<T>::Flatten(*outs[i]);
 
       std::vector<int> reduce_dims_vec;
       std::vector<int> reshape_dims_vec;

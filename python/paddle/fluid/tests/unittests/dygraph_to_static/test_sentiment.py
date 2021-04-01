@@ -15,6 +15,7 @@ import time
 import unittest
 import numpy as np
 
+import paddle
 import paddle.fluid as fluid
 from paddle.fluid.dygraph.nn import Conv2D, Linear, Embedding
 from paddle.fluid.dygraph import to_variable, ProgramTranslator, declarative
@@ -248,13 +249,15 @@ class BiGRU(fluid.dygraph.Layer):
 
 
 def fake_data_reader(class_num, vocab_size, batch_size, padding_size):
+    local_random = np.random.RandomState(SEED)
+
     def reader():
         batch_data = []
         while True:
-            label = np.random.randint(0, class_num)
-            seq_len = np.random.randint(padding_size // 2,
-                                        int(padding_size * 1.2))
-            word_ids = np.random.randint(0, vocab_size, [seq_len]).tolist()
+            label = local_random.randint(0, class_num)
+            seq_len = local_random.randint(padding_size // 2,
+                                           int(padding_size * 1.2))
+            word_ids = local_random.randint(0, vocab_size, [seq_len]).tolist()
             word_ids = word_ids[:padding_size] + [vocab_size] * (padding_size -
                                                                  seq_len)
             batch_data.append((word_ids, [label], seq_len))
@@ -272,7 +275,7 @@ class Args(object):
     lr = 0.01
     vocab_size = 1000
     padding_size = 50
-    log_step = 2
+    log_step = 5
     train_step = 10
 
 
@@ -283,8 +286,8 @@ def train(args, to_static):
 
     with fluid.dygraph.guard(place):
         np.random.seed(SEED)
-        fluid.default_startup_program().random_seed = SEED
-        fluid.default_main_program().random_seed = SEED
+        paddle.seed(SEED)
+        paddle.framework.random._manual_program_seed(SEED)
 
         train_reader = fake_data_reader(args.class_num, args.vocab_size,
                                         args.batch_size, args.padding_size)

@@ -19,6 +19,7 @@ import math
 import numpy as np
 import unittest
 
+import paddle
 import paddle.fluid as fluid
 import paddle.fluid.layers as layers
 import paddle.fluid.framework as framework
@@ -116,7 +117,109 @@ def step_decay(global_step, learning_rate, step_size, decay_rate=0.1):
     return learning_rate * math.pow(decay_rate, global_step // step_size)
 
 
+def lambda_decay(global_step, learning_rate, lr_lambda):
+    return learning_rate * lr_lambda(global_step)
+
+
 class TestLearningRateDecayDygraph(unittest.TestCase):
+    def test_LR_state_dict(self):
+        with fluid.dygraph.guard():
+            x = np.random.uniform(-1, 1, [3, 10]).astype("float32")
+            linear = fluid.dygraph.Linear(10, 10)
+            input = fluid.dygraph.to_variable(x)
+
+            Exponential_scheduler = fluid.dygraph.ExponentialDecay(
+                learning_rate=0.1,
+                decay_steps=10000,
+                decay_rate=0.5,
+                staircase=True)
+            Step_scheduler = fluid.dygraph.StepDecay(0.5, step_size=3)
+            Reducelr_scheduler = fluid.dygraph.ReduceLROnPlateau(
+                learning_rate=1.0, decay_rate=0.5, patience=5, cooldown=3)
+
+            adam1 = fluid.optimizer.Adam(
+                learning_rate=Exponential_scheduler,
+                parameter_list=linear.parameters())
+            adam2 = fluid.optimizer.Adam(
+                learning_rate=Step_scheduler,
+                parameter_list=linear.parameters())
+            adam3 = fluid.optimizer.Adam(
+                learning_rate=Reducelr_scheduler,
+                parameter_list=linear.parameters())
+            print(adam3.state_dict())
+
+            for epoch in range(10):
+                out = linear(input)
+                loss = fluid.layers.reduce_mean(out)
+                loss.backward()
+                adam1.minimize(loss)
+                adam2.minimize(loss)
+                adam3.minimize(loss)
+                linear.clear_gradients()
+
+                Step_scheduler.epoch()
+                Reducelr_scheduler.step(loss)
+
+            fluid.dygraph.save_dygraph(linear.state_dict(), "save_path")
+
+            Exponential_scheduler_test = fluid.dygraph.ExponentialDecay(
+                learning_rate=0.1,
+                decay_steps=10000,
+                decay_rate=0.5,
+                staircase=True)
+            Step_scheduler_test = fluid.dygraph.StepDecay(0.5, step_size=3)
+            Reducelr_scheduler_test = fluid.dygraph.ReduceLROnPlateau(
+                learning_rate=1.0, decay_rate=0.5, patience=5, cooldown=3)
+
+            fluid.dygraph.save_dygraph(adam1.state_dict(), "save_path")
+            _, opt_state = fluid.dygraph.load_dygraph("save_path")
+            adam_test = fluid.optimizer.Adam(
+                learning_rate=Exponential_scheduler_test,
+                parameter_list=linear.parameters())
+            adam_test.set_dict(opt_state)
+            self.assertEqual(adam_test._learning_rate.step_num,
+                             adam1._learning_rate.step_num,
+                             "epoch_num is different before and after set_dict")
+
+            fluid.dygraph.save_dygraph(adam2.state_dict(), "save_path")
+            _, opt_state = fluid.dygraph.load_dygraph("save_path")
+            adam_test = fluid.optimizer.Adam(
+                learning_rate=Step_scheduler_test,
+                parameter_list=linear.parameters())
+            adam_test.set_dict(opt_state)
+            self.assertEqual(adam_test._learning_rate.epoch_num,
+                             adam2._learning_rate.epoch_num,
+                             "epoch_num is different before and after set_dict")
+            self.assertEqual(
+                adam_test._learning_rate(),
+                adam2._learning_rate(),
+                "current learning rate is different before and after set_dict")
+
+            fluid.dygraph.save_dygraph(adam3.state_dict(), "save_path")
+            _, opt_state = fluid.dygraph.load_dygraph("save_path")
+            adam_test = fluid.optimizer.Adam(
+                learning_rate=Reducelr_scheduler_test,
+                parameter_list=linear.parameters())
+            adam_test.set_dict(opt_state)
+            self.assertEqual(adam_test._learning_rate.best_loss,
+                             adam3._learning_rate.best_loss.numpy()[0],
+                             "best_loss is different before and after set_dict")
+            self.assertEqual(
+                adam_test._learning_rate.cooldown_counter,
+                adam3._learning_rate.cooldown_counter,
+                "cooldown_counter is different before and after set_dict")
+            self.assertEqual(
+                adam_test._learning_rate.num_bad_epochs,
+                adam3._learning_rate.num_bad_epochs,
+                "num_bad_epochs is different before and after set_dict")
+            self.assertEqual(adam_test._learning_rate.epoch_num,
+                             adam3._learning_rate.epoch_num,
+                             "epoch is different before and after set_dict")
+            self.assertEqual(
+                adam_test._learning_rate(),
+                adam3._learning_rate(),
+                "current learning rate is different before and after set_dict")
+
     def test_NoamDecay(self):
         with fluid.dygraph.guard():
             d_model = 0.01
@@ -165,17 +268,22 @@ class TestLearningRateDecayDygraph(unittest.TestCase):
             learning_rate = 0.5
             milestones = [2, 4, 8]
             decay_rate = 0.2
+            linear = fluid.dygraph.Linear(10, 10)
+
             scheduler = fluid.dygraph.MultiStepDecay(learning_rate, milestones,
                                                      decay_rate)
+
+            adam = fluid.optimizer.AdamOptimizer(
+                learning_rate=scheduler, parameter_list=linear.parameters())
             for epoch in range(10):
                 right_result = multi_step_decay(epoch, learning_rate,
                                                 milestones, decay_rate)
-                fluid_result = scheduler().numpy()[0]
+                fluid_result = adam.current_step_lr()
                 scheduler.epoch()
                 self.assertAlmostEqual(
                     right_result,
                     fluid_result,
-                    msg='Failed lr scheduler in step {0}, Python result is {1}, Fluid result is {2}'.
+                    msg='Failed lr scheduler in epoch {0}, Python result is {1}, Fluid result is {2}'.
                     format(epoch, right_result, fluid_result))
 
             with self.assertRaises(ValueError):
@@ -190,7 +298,7 @@ class TestLearningRateDecayDygraph(unittest.TestCase):
                 lr = fluid.dygraph.MultiStepDecay("test", [20, 30, 50])
 
             with self.assertRaises(ValueError):
-                lr = fluid.dygraph.MultiStepDecay(2.0, [20, 30, 50])
+                lr = fluid.dygraph.MultiStepDecay(-1, [20, 30, 50])
 
     def test_StepDecay(self):
         with fluid.dygraph.guard():
@@ -207,15 +315,37 @@ class TestLearningRateDecayDygraph(unittest.TestCase):
                 self.assertAlmostEqual(
                     right_result,
                     fluid_result,
-                    msg='Failed lr scheduler in step {0}, Python result is {1}, Fluid result is {2}'.
+                    msg='Failed lr scheduler in epoch {0}, Python result is {1}, Fluid result is {2}'.
                     format(epoch, right_result, fluid_result))
 
             with self.assertRaises(TypeError):
-                lr = fluid.dygraph.MultiStepDecay(learning_rate, "test", 0.1)
+                lr = fluid.dygraph.StepDecay(learning_rate, "test", 0.1)
 
             with self.assertRaises(ValueError):
-                lr = fluid.dygraph.MultiStepDecay(learning_rate, [20, 30, 50],
-                                                  1)
+                lr = fluid.dygraph.StepDecay(learning_rate, 20, 2)
+
+    def test_LambdaDecay(self):
+        with fluid.dygraph.guard():
+            learning_rate = 0.5
+            lr_lambda = lambda x: 0.95**x
+            scheduler = fluid.dygraph.LambdaDecay(learning_rate, lr_lambda)
+
+            linear = fluid.dygraph.nn.Linear(10, 10)
+            adam = fluid.optimizer.Adam(
+                scheduler, parameter_list=linear.parameters())
+
+            for epoch in range(30):
+                right_result = lambda_decay(epoch, learning_rate, lr_lambda)
+                fluid_result = scheduler().numpy()[0]
+                scheduler.epoch()
+                self.assertAlmostEqual(
+                    right_result,
+                    fluid_result,
+                    msg='Failed lr scheduler in epoch {0}, Python result is {1}, Fluid result is {2}'.
+                    format(epoch, right_result, fluid_result))
+
+            with self.assertRaises(TypeError):
+                lr = fluid.dygraph.LambdaDecay(learning_rate, "test")
 
 
 class TestLearningRateDecay(unittest.TestCase):
@@ -391,112 +521,6 @@ class TestLinearWamrupLearningRateDecayWithScalarInput(unittest.TestCase):
         start_lr = 0
         end_lr = 1
         run_places(lr, start_lr, end_lr)
-
-
-def reduce_lr_on_plateau(decay_rate, threshold, cooldown, patience, m, n, loss,
-                         var_list):
-    def is_better(current, best, m, n):
-        if m == 'min' and n == 'rel':
-            return current < best - best * threshold
-        elif m == 'min' and n == 'abs':
-            return current < best - threshold
-        elif m == 'max' and n == 'rel':
-            return current > best + best * threshold
-        else:  # mode == 'max' and epsilon_mode == 'abs':
-            return current > best + threshold
-
-    if var_list[2] > 0:
-        var_list[2] -= 1
-        return var_list[1]
-
-    if is_better(loss, var_list[0], m, n):
-        var_list[0] = loss
-        var_list[3] = 0
-    else:
-        var_list[3] += 1
-        if var_list[3] > patience:
-            var_list[2] = cooldown
-            var_list[3] = 0
-            new_lr = var_list[1] * decay_rate
-            var_list[1] = new_lr if var_list[1] - new_lr > 1e-8 else var_list[1]
-
-    return var_list[1]
-
-
-class TestReduceLROnPlateauDecay(unittest.TestCase):
-    def test_dygraph_mode(self):
-        with fluid.dygraph.guard():
-            # the decay rate must be less than 1.0
-            with self.assertRaises(ValueError):
-                fluid.dygraph.ReduceLROnPlateau(
-                    learning_rate=1.0, decay_rate=2.0)
-            # the mode must be "min" or "max"
-            with self.assertRaises(ValueError):
-                fluid.dygraph.ReduceLROnPlateau(learning_rate=1.0, mode="test")
-            # the threshold_mode must be "rel" or "abs"
-            with self.assertRaises(ValueError):
-                fluid.dygraph.ReduceLROnPlateau(
-                    learning_rate=1.0, threshold_mode="test")
-
-            base_lr = 1.0
-            patience = 3
-            cooldown = 1
-            decay_rate = 0.5
-            threshold = 1e-4
-            linear = fluid.dygraph.Linear(10, 10)
-
-            for m, n in zip(['min', 'max', 'min', 'max'],
-                            ['rel', 'rel', 'abs', 'abs']):
-                kwargs = {
-                    'learning_rate': base_lr,
-                    'decay_rate': decay_rate,
-                    'threshold': threshold,
-                    'verbose': True,
-                    'patience': patience,
-                    'cooldown': cooldown,
-                    'mode': m,
-                    'threshold_mode': n,
-                    'eps': 1e-6
-                }
-                print("class=" + fluid.dygraph.ReduceLROnPlateau.__name__ +
-                      " kwargs=" + str(kwargs))
-                lr = fluid.dygraph.ReduceLROnPlateau(**kwargs)
-                sgd = fluid.optimizer.SGD(learning_rate=lr,
-                                          parameter_list=linear.parameters())
-
-                best = float("-10000") if m == "max" else float("10000")
-                expected_lr = 1.0
-                cooldown_counter = 0
-                num_bad_epochs = 0
-                var_list = [best, expected_lr, cooldown_counter, num_bad_epochs]
-                step_num = 0
-                epoch_num = 0
-                for epoch in range(30):
-                    total_loss = 0
-
-                    for batch_id in range(2):
-                        step_num += 1
-                        x = fluid.dygraph.to_variable(
-                            np.array([step_num]).astype('float32'))
-                        loss = layers.sin(x)
-                        sgd.minimize(loss)
-                        total_loss += loss
-
-                    epoch_num += 1
-                    # get expected lr from fluid
-                    avg_loss = total_loss / 1
-                    lr.step(avg_loss)
-                    actual_lr = lr().numpy()[0]
-
-                    # get expected lr form python
-                    expected_lr = reduce_lr_on_plateau(decay_rate, threshold,
-                                                       cooldown, patience, m, n,
-                                                       avg_loss, var_list)
-                    self.assertEqual(
-                        expected_lr,
-                        actual_lr,
-                        msg='Failed reduce lr scheduler in epoch {0}, Python result is {1}, Fluid result is {2}'.
-                        format(epoch_num, expected_lr, actual_lr))
 
 
 if __name__ == '__main__':

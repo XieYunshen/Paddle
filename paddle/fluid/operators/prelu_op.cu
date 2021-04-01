@@ -25,11 +25,6 @@ using Tensor = framework::Tensor;
 
 #define CUDA_NUM_THREADS 1024
 
-// CUDA: grid stride looping
-#define CUDA_KERNEL_LOOP(i, n)                                 \
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (n); \
-       i += blockDim.x * gridDim.x)
-
 inline static int PADDLE_GET_BLOCKS(const int N) {
   return (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
 }
@@ -100,7 +95,7 @@ __global__ void PReluOpGradKernel(const T* x_ptr, const T* alpha_ptr,
 template <typename T>
 class PreluOpGradFunctor {
  public:
-  void operator()(cudaStream_t stream, const T* x, const T* alpha, const T* dy,
+  void operator()(gpuStream_t stream, const T* x, const T* alpha, const T* dy,
                   T* dx, T* dalpha, const framework::DDim& input_dims,
                   PRELU_MODE mode) {
     size_t numel = 1;

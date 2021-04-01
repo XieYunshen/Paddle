@@ -5,46 +5,9 @@ if [ -z ${BRANCH} ]; then
 fi
 
 PADDLE_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}")/../" && pwd )"
-API_FILES=("CMakeLists.txt"
-           "paddle/fluid/framework/operator.h"
-           "paddle/fluid/framework/tensor.h"
-           "paddle/fluid/framework/details/op_registry.h"
-           "paddle/fluid/framework/grad_op_desc_maker.h"
-           "paddle/fluid/framework/lod_tensor.h"
-           "paddle/fluid/framework/selected_rows.h"
-           "paddle/fluid/framework/op_desc.h"
-           "paddle/fluid/framework/block_desc.h"
-           "paddle/fluid/framework/var_desc.h"
-           "paddle/fluid/framework/scope.h"
-           "paddle/fluid/framework/ir/node.h"
-           "paddle/fluid/framework/ir/graph.h"
-           "paddle/fluid/framework/framework.proto"
-           "python/requirements.txt"
-           "python/paddle/fluid/__init__.py"
-           "python/paddle/fluid/compiler.py"
-           "python/paddle/fluid/parallel_executor.py"
-           "python/paddle/fluid/framework.py"
-           "python/paddle/fluid/backward.py"
-           "paddle/fluid/operators/distributed/send_recv.proto.in"
-           "paddle/fluid/framework/unused_var_check.cc"
-           "paddle/fluid/pybind/op_function_generator.cc"
-           "python/paddle/fluid/tests/unittests/white_list/check_shape_white_list.py"
-           "python/paddle/fluid/tests/unittests/white_list/op_accuracy_white_list.py"
-           "python/paddle/fluid/tests/unittests/white_list/compile_vs_runtime_white_list.py"
-           "python/paddle/fluid/tests/unittests/white_list/no_check_set_white_list.py"
-           "python/paddle/fluid/tests/unittests/white_list/check_op_sequence_instance_0_input_white_list.py"
-           "python/paddle/fluid/tests/unittests/white_list/op_threshold_white_list.py"
-           "python/paddle/fluid/tests/unittests/white_list/check_op_sequence_batch_1_input_white_list.py"
-           "python/paddle/fluid/tests/unittests/white_list/no_grad_set_white_list.py"
-           "tools/wlist.json"
-           )
-
 approval_line=`curl -H "Authorization: token ${GITHUB_API_TOKEN}" https://api.github.com/repos/PaddlePaddle/Paddle/pulls/${GIT_PR_ID}/reviews?per_page=10000`
-git_files=`git diff --numstat upstream/$BRANCH| wc -l`
-git_count=`git diff --numstat upstream/$BRANCH| awk '{sum+=$1}END{print sum}'`
 failed_num=0
 echo_list=()
-
 
 function check_approval(){
     person_num=`echo $@|awk '{for (i=2;i<=NF;i++)print $i}'`
@@ -54,40 +17,43 @@ function check_approval(){
     fi
 }
 
-
 function add_failed(){
     failed_num=`expr $failed_num + 1`
     echo_list="${echo_list[@]}$1"
 }
 
 
-if [[ $git_files -gt 19 || $git_count -gt 999 ]];then
-    echo_line="You must have Dianhai approval for change 20+ files or add than 1000+ lines of content.\n"
-    check_approval 1 38231817
-fi    
-
 api_spec_diff=`python ${PADDLE_ROOT}/tools/diff_api.py ${PADDLE_ROOT}/paddle/fluid/API_DEV.spec.api  ${PADDLE_ROOT}/paddle/fluid/API_PR.spec.api` 
 if [ "$api_spec_diff" != "" ]; then
-    echo_line="You must have one RD (XiaoguangHu01 or lanxianghit) and one TPM (saxon-zh or Boyan-Liu or swtkiwi or Heeenrrry) approval for the api change for the management reason of API interface.\n"
+    echo_line="You must have one RD (XiaoguangHu01 or lanxianghit) and one TPM (saxon-zh or jzhang533 or swtkiwi or Heeenrrry or TCChenlong) approval for the api change for the management reason of API interface.\n"
     check_approval 1 46782768 47554610
     echo_line=""
-    check_approval 1 2870059 2870059 27208573 28379894
+    check_approval 1 2870059 29231 27208573 28379894 11935832
 fi
 
 api_doc_spec_diff=`python ${PADDLE_ROOT}/tools/diff_api.py ${PADDLE_ROOT}/paddle/fluid/API_DEV.spec.doc  ${PADDLE_ROOT}/paddle/fluid/API_PR.spec.doc` 
 if [ "$api_doc_spec_diff" != "" ]; then
-    echo_line="You must have one TPM (saxon-zh or Boyan-Liu or swtkiwi or Heeenrrry) approval for the api change for the management reason of API document.\n"
-    check_approval 1 31623103 2870059 27208573 28379894
+    echo_line="You must have one TPM (saxon-zh or jzhang533 or swtkiwi or Heeenrrry or TCChenlong) approval for the api change for the management reason of API document.\n"
+    check_approval 1 2870059 29231 27208573 28379894 11935832
+fi
+
+api_spec_diff=`python ${PADDLE_ROOT}/tools/check_api_source_without_core_ops.py ${PADDLE_ROOT}/paddle/fluid/API_DEV.source.md5  ${PADDLE_ROOT}/paddle/fluid/API_PR.source.md5` 
+if [ "$api_spec_diff" != "" ]; then
+    echo_line="APIs without core.ops: \n${api_spec_diff}\n"
+    echo_line="${echo_line}You must have one RD (zhiqiu (Recommend) or phlrain) approval for the api change for the opreator-related api without 'core.ops'.\n"
+    echo_line="${echo_line}For more details, please click [https://github.com/PaddlePaddle/Paddle/wiki/paddle_api_development_manual.md]\n"
+    check_approval 1 6888866 43953930
 fi
 
 op_type_spec_diff=`python ${PADDLE_ROOT}/tools/check_op_register_type.py ${PADDLE_ROOT}/paddle/fluid/OP_TYPE_DEV.spec  ${PADDLE_ROOT}/paddle/fluid/OP_TYPE_PR.spec`
 if [ "$op_type_spec_diff" != "" ]; then
     echo_line="You must have one RD (Aurelius84 (Recommend) or liym27 or zhhsplendid)approval for the data_type registration of new operator. More data_type of new operator should be registered in your PR. Please make sure that both float/double (or int/int64_t) have been registered.\n For more details, please click [https://github.com/PaddlePaddle/Paddle/wiki/Data-types-of-generic-Op-must-be-fully-registered].\n"
-    check_approval 1 9301846 33742067 7913861
+    check_approval 1 9j301846 33742067 7913861
 fi
 
 op_desc_diff=`python ${PADDLE_ROOT}/tools/check_op_desc.py ${PADDLE_ROOT}/paddle/fluid/OP_DESC_DEV.spec  ${PADDLE_ROOT}/paddle/fluid/OP_DESC_PR.spec`
 if [ "$op_desc_diff" != "" ]; then
+<<<<<<< HEAD
     echo_line="You must have one RD (liym27 (Recommend), zhhsplendid, Aurelius84, lanxianghit or phlrain) approval for the changes of Inputs/Output/Attrs of OPs. The changes of OPs will cause that the new version inference fails to load model trained by the old version. Please modify your code. \n For more details, please click [https://github.com/PaddlePaddle/Paddle/wiki/OP-Input-Output-Attribute-Compatibility-Modification].\n${op_desc_diff}\n"
     check_approval 1 33742067 7913861 9301846 47554610 43953930
 fi
@@ -279,6 +245,10 @@ if [ "${UNITTEST_FILE_CHANGED}" != "" ] && [ "${GIT_PR_ID}" != "" ]; then
         echo_line="It is an Op accuracy problem, please take care of it. You must have one RD (zhangting2020 (Recommend), luotao1 or phlrain) approval for the usage (either add or delete) of @skip_check_grad_ci. For more information, please refer to: https://github.com/PaddlePaddle/Paddle/wiki/Gradient-Check-Is-Required-for-Op-Test. The corresponding lines are as follows:\n${ERROR_LINES}\n"
         check_approval 1 26615455 6836917 43953930
     fi
+=======
+    echo_line="You must have one RD (cyj1986, Superjomn) approval for the changes of Inputs/Output/Attrs of OPs. The changes of OPs will cause that the new version inference fails to load model trained by the old version. Please modify your code. \n For more details, please click [https://github.com/PaddlePaddle/Paddle/wiki/OP-Input-Output-Attribute-Compatibility-Modification].\n${op_desc_diff}\n"
+    check_approval 1 39645414 328693
+>>>>>>> 6b7448668d85ad9f831ea13a3a0c134a9ae99984
 fi
 
 RUNTYPE_FILE_CHANGED=`git diff --name-only --diff-filter=AM upstream/$BRANCH|grep -E "CMakeLists.txt"||true`
@@ -300,18 +270,8 @@ DEV_OP_USE_DEFAULT_GRAD_MAKER_SPEC=${PADDLE_ROOT}/paddle/fluid/op_use_default_gr
 PR_OP_USE_DEFAULT_GRAD_MAKER_SPEC=${PADDLE_ROOT}/paddle/fluid/op_use_default_grad_maker_PR.spec
 ADDED_OP_USE_DEFAULT_GRAD_MAKER=`python ${PADDLE_ROOT}/tools/diff_use_default_grad_op_maker.py ${DEV_OP_USE_DEFAULT_GRAD_MAKER_SPEC} ${PR_OP_USE_DEFAULT_GRAD_MAKER_SPEC}` 
 if [ "${ADDED_OP_USE_DEFAULT_GRAD_MAKER}" != "" ]; then
-  echo_line="You must have one RD (sneaxiy (Recommend) or luotao1) approval because you use DefaultGradOpMaker for ${ADDED_OP_USE_DEFAULT_GRAD_MAKER}, which manages the grad_op memory optimization.\n" 
-  check_approval 1 32832641 6836917
-fi
-
-# Get the list of PR authors with unresolved unit test issues
-pip install PyGithub
-# For getting PR related data
-wget https://paddle-ci.gz.bcebos.com/blk/block.txt
-HASUTFIXED=`python ${PADDLE_ROOT}/tools/check_ut.py | grep "has unit-test to be fixed" || true`
-if [ "${HASUTFIXED}" != "" ]; then
-  echo_line="${HASUTFIXED} You must have one RD (chalsliu (Recommend) or kolinwei) approval.\n"
-  check_approval 1 45041955 22165420
+  echo_line="You must have one RD (zhiqiu (Recommend) or zhhsplendid) approval because you use DefaultGradOpMaker for ${ADDED_OP_USE_DEFAULT_GRAD_MAKER}, which manages the grad_op memory optimization.\n" 
+  check_approval 1 6888866 7913861
 fi
 
 if [ -n "${echo_list}" ];then
@@ -324,5 +284,5 @@ fi
 python ${PADDLE_ROOT}/tools/diff_api.py ${PADDLE_ROOT}/paddle/fluid/API_DEV.spec  ${PADDLE_ROOT}/paddle/fluid/API_PR.spec
 python ${PADDLE_ROOT}/tools/check_op_register_type.py ${PADDLE_ROOT}/paddle/fluid/OP_TYPE_DEV.spec  ${PADDLE_ROOT}/paddle/fluid/OP_TYPE_PR.spec
 if [ -n "${echo_list}" ]; then
-  exit 1
+  exit 6
 fi
