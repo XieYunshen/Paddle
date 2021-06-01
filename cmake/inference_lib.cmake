@@ -146,12 +146,12 @@ copy(inference_lib_dist
         SRCS ${THREADPOOL_INCLUDE_DIR}/ThreadPool.h
         DSTS ${dst_dir})
 
-# Only GPU need cudaErrorMessage.pb
+# GPU must copy externalErrorMsg.pb
 IF(WITH_GPU)
-        set(dst_dir "${PADDLE_INFERENCE_INSTALL_DIR}/third_party/cudaerror/data")
-        copy(inference_lib_dist
-                SRCS ${cudaerror_INCLUDE_DIR}
-                DSTS ${dst_dir})
+    set(dst_dir "${PADDLE_INFERENCE_INSTALL_DIR}/third_party/externalError/data")
+    copy(inference_lib_dist
+            SRCS ${externalError_INCLUDE_DIR}
+            DSTS ${dst_dir})
 ENDIF()
 
 # CMakeCache Info
@@ -211,11 +211,11 @@ set(src_dir "${PADDLE_SOURCE_DIR}/paddle/fluid")
 if(WIN32)
   set(paddle_inference_c_lib $<TARGET_FILE_DIR:paddle_inference_c>/paddle_inference_c.*)
 else(WIN32)
-  set(paddle_inference_c_lib ${PADDLE_BINARY_DIR}/paddle/fluid/inference/capi/libpaddle_inference_c.*)
+  set(paddle_inference_c_lib ${PADDLE_BINARY_DIR}/paddle/fluid/inference/capi_exp/libpaddle_inference_c.*)
 endif(WIN32)
 
 copy(inference_lib_dist
-      SRCS  ${src_dir}/inference/capi/paddle_c_api.h  ${paddle_inference_c_lib}
+      SRCS  ${src_dir}/inference/capi_exp/pd_*.h  ${paddle_inference_c_lib}
       DSTS  ${PADDLE_INFERENCE_C_INSTALL_DIR}/paddle/include ${PADDLE_INFERENCE_C_INSTALL_DIR}/paddle/lib)
 
 # fluid library for both train and inference
@@ -259,7 +259,7 @@ copy(fluid_lib_dist
 set(module "platform")
 set(platform_lib_deps profiler_proto error_codes_proto)
 if(WITH_GPU)
-  set(platform_lib_deps ${platform_lib_deps} cuda_error_proto)
+  set(platform_lib_deps ${platform_lib_deps} external_error_proto)
 endif(WITH_GPU)
 
 add_dependencies(fluid_lib_dist ${platform_lib_deps})

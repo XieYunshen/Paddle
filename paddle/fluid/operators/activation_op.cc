@@ -162,6 +162,12 @@ $$out = \\frac{1}{1 + e^{-x}}$$
 
 )DOC";
 
+UNUSED constexpr char SiluDoc[] = R"DOC(
+Silu Activation Operator
+
+$$out = x * \\frac{1}{1 + e^{-x}}$$
+)DOC";
+
 UNUSED constexpr char LogSigmoidDoc[] = R"DOC(
 Logsigmoid Activation Operator
 
@@ -697,6 +703,7 @@ It is recommended to use the defaults for this activation.
 };
 
 REGISTER_ACTIVATION_OP_MAKER(Sigmoid, SigmoidDoc);
+REGISTER_ACTIVATION_OP_MAKER(Silu, SiluDoc);
 REGISTER_ACTIVATION_OP_MAKER(LogSigmoid, LogSigmoidDoc);
 REGISTER_ACTIVATION_OP_MAKER(Exp, ExpDoc);
 REGISTER_ACTIVATION_OP_MAKER(Relu, ReluDoc);
@@ -779,6 +786,47 @@ class ActivationOpDoubleGrad2 : public framework::OperatorWithKernel {
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext& ctx) const override {
     return GetKernelType(ctx, *this, "DDX");
+  }
+};
+
+template <typename T>
+class SigmoidDoubleGradMaker
+    : public ::paddle::framework::SingleGradOpMaker<T> {
+ public:
+  using ::paddle::framework::SingleGradOpMaker<T>::SingleGradOpMaker;
+
+ protected:
+  void Apply(GradOpPtr<T> op) const override {
+    op->SetType("sigmoid_grad_grad");
+    // input1: Out
+    op->SetInput("Out", this->Input("Out"));
+    // input2: ddx
+    op->SetInput("DDX", this->OutputGrad(framework::GradVarName("X")));
+    op->SetInput("DOut", this->Input(framework::GradVarName("Out")));
+    op->SetAttrMap(this->Attrs());
+    // output: ddy
+    op->SetOutput("DOutNew", this->InputGrad("Out"));
+    op->SetOutput("DDOut", this->InputGrad(framework::GradVarName("Out")));
+  }
+};
+
+template <typename T>
+class TanhDoubleGradMaker : public ::paddle::framework::SingleGradOpMaker<T> {
+ public:
+  using ::paddle::framework::SingleGradOpMaker<T>::SingleGradOpMaker;
+
+ protected:
+  void Apply(GradOpPtr<T> op) const override {
+    op->SetType("tanh_grad_grad");
+    // input1: Out
+    op->SetInput("Out", this->Input("Out"));
+    // input2: ddx
+    op->SetInput("DDX", this->OutputGrad(framework::GradVarName("X")));
+    op->SetInput("DOut", this->Input(framework::GradVarName("Out")));
+    op->SetAttrMap(this->Attrs());
+    // output: ddy
+    op->SetOutput("DOutNew", this->InputGrad("Out"));
+    op->SetOutput("DDOut", this->InputGrad(framework::GradVarName("Out")));
   }
 };
 
@@ -1040,6 +1088,75 @@ namespace plat = paddle::platform;
 
 FOR_EACH_ACTIVATION_OP(REGISTER_ACTIVATION_OP);
 FOR_EACH_ACTIVATION_OP(REGISTER_ACTIVATION_CPU_KERNEL);
+
+/* ==========================    sigmoid register  =============================
+ */
+// 1. Register Sigmoid Operator
+REGISTER_OPERATOR(
+    sigmoid, ops::ActivationOp, ops::SigmoidOpMaker,
+    ops::ActivationOpInferVarType,
+    ops::ActivationGradOpMaker<ops::SigmoidGradFunctor<float>::FwdDeps(),
+                               paddle::framework::OpDesc>,
+    ops::ActivationGradOpMaker<ops::SigmoidGradFunctor<float>::FwdDeps(),
+                               paddle::imperative::OpBase>,
+    std::conditional<ops::CanInplaceAct<ops::SigmoidGradFunctor<float>>(),
+                     ops::ActFwdInplaceInferer, void>::type);
+
+// 2. Register Sigmoid Grad Operator
+REGISTER_OPERATOR(sigmoid_grad, ops::ActivationOpGrad,
+                  ops::ActivationGradOpInplaceInferer,
+                  ops::SigmoidDoubleGradMaker<paddle::framework::OpDesc>,
+                  ops::SigmoidDoubleGradMaker<paddle::imperative::OpBase>)
+
+// 3. Register Sigmoid DoubleGrad Operator
+REGISTER_OPERATOR(
+    sigmoid_grad_grad,
+    ops::ActivationOpDoubleGrad<ops::SigmoidGradFunctor<float>::FwdDeps()>,
+    ops::ActivationDoubleGradOpInplaceInferer);
+
+// Register Sigmoid/GradSigmoid Kernels
+REGISTER_ACTIVATION_CPU_KERNEL(sigmoid, Sigmoid, SigmoidFunctor,
+                               SigmoidGradFunctor);
+
+// Register DoubleGrad Kernel
+REGISTER_OP_CPU_KERNEL(
+    sigmoid_grad_grad,
+    ops::SigmoidDoubleGradKernel<plat::CPUDeviceContext,
+                                 ops::SigmoidGradGradFunctor<float>>,
+    ops::SigmoidDoubleGradKernel<plat::CPUDeviceContext,
+                                 ops::SigmoidGradGradFunctor<double>>,
+    ops::SigmoidDoubleGradKernel<plat::CPUDeviceContext,
+                                 ops::SigmoidGradGradFunctor<plat::float16>>);
+
+/* ========================================================================== */
+
+/* ==========================    tanh register  ============================= */
+REGISTER_OPERATOR(
+    tanh, ops::ActivationOp, ops::TanhOpMaker, ops::ActivationOpInferVarType,
+    ops::ActivationGradOpMaker<ops::TanhGradFunctor<float>::FwdDeps(),
+                               paddle::framework::OpDesc>,
+    ops::ActivationGradOpMaker<ops::TanhGradFunctor<float>::FwdDeps(),
+                               paddle::imperative::OpBase>,
+    std::conditional<ops::CanInplaceAct<ops::TanhGradFunctor<float>>(),
+                     ops::ActFwdInplaceInferer, void>::type);
+REGISTER_OPERATOR(tanh_grad, ops::ActivationOpGrad,
+                  ops::ActivationGradOpInplaceInferer,
+                  ops::TanhDoubleGradMaker<paddle::framework::OpDesc>,
+                  ops::TanhDoubleGradMaker<paddle::imperative::OpBase>)
+REGISTER_OPERATOR(
+    tanh_grad_grad,
+    ops::ActivationOpDoubleGrad<ops::TanhGradFunctor<float>::FwdDeps()>,
+    ops::ActivationDoubleGradOpInplaceInferer);
+
+REGISTER_ACTIVATION_CPU_KERNEL(tanh, Tanh, TanhFunctor, TanhGradFunctor);
+REGISTER_OP_CPU_KERNEL(
+    tanh_grad_grad, ops::TanhDoubleGradKernel<plat::CPUDeviceContext,
+                                              ops::TanhGradGradFunctor<float>>,
+    ops::TanhDoubleGradKernel<plat::CPUDeviceContext,
+                              ops::TanhGradGradFunctor<double>>,
+    ops::TanhDoubleGradKernel<plat::CPUDeviceContext,
+                              ops::TanhGradGradFunctor<plat::float16>>);
+/* ========================================================================== */
 
 /* ==========================    relu register  ============================= */
 REGISTER_OPERATOR(
