@@ -3467,15 +3467,15 @@ EOF
     cd ..
     if [ "${PYTHON_EXECUTABLE}" != "" ];then
         if [ "$SYSTEM" == "Darwin" ]; then
-            ${PYTHON_EXECUTABLE} setup.py $2 --plat-name=macosx_10_9_x86_64;build_error=$?
+            ${PYTHON_EXECUTABLE} setup.py $2 $3 --plat-name=macosx_10_9_x86_64;build_error=$?
         else
-            ${PYTHON_EXECUTABLE} setup.py $2;build_error=$?
+            ${PYTHON_EXECUTABLE} setup.py $2 $3;build_error=$?
         fi
     else
         if [ "$SYSTEM" == "Darwin" ]; then
-            python setup.py $2 --plat-name=macosx_10_9_x86_64;build_error=$?
+            python setup.py $2 $3 --plat-name=macosx_10_9_x86_64;build_error=$?
         else
-            python setup.py $2;build_error=$?
+            python setup.py $2 $3;build_error=$?
         fi
     fi
 
@@ -3733,6 +3733,9 @@ function main() {
     case $CMD in
       build_only)
         run_setup ${PYTHON_ABI:-""} bdist_wheel ${parallel_number}
+        ;;
+      build_only_rerun_cmake)
+        run_setup ${PYTHON_ABI:-""} bdist_wheel ${parallel_number} rerun-cmake
         ;;
       build_pr_dev)
         build_pr_and_develop
